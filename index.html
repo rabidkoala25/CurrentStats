@@ -110,6 +110,25 @@ td.t a{text-decoration:none} td.t a:hover{text-decoration:underline}
 tr:hover td{background:#F4F7FA}
 .hot{color:var(--signal); font-weight:700}
 
+/* Channel tabs + lookup */
+nav.channels{padding:22px 0 0; display:grid; gap:12px}
+.tablist{display:flex; gap:8px; overflow-x:auto; padding-bottom:4px}
+.tab{display:flex; align-items:center; gap:8px; padding:6px 12px 6px 6px; border:1px solid var(--ink); background:var(--panel); text-decoration:none; white-space:nowrap; font-weight:600; font-size:.95rem}
+.tab img,.tab .ph{width:26px; height:26px; border-radius:50%; background:var(--grid)}
+.tab[aria-current="page"]{background:var(--ink); color:#fff}
+.tab .live{font-size:.72rem; font-weight:700; color:var(--signal); border:1px solid currentColor; padding:0 5px; border-radius:3px}
+.tab[aria-current="page"] .live{color:#FFB3BD}
+.lookup-row{display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center}
+form.lookup{display:flex; flex:1 1 360px; max-width:560px}
+form.lookup input{flex:1; min-width:0; font:inherit; padding:9px 12px; border:2px solid var(--ink); border-right:0; background:var(--panel); color:var(--ink)}
+button{font:inherit; font-weight:650; padding:9px 16px; border:2px solid var(--ink); background:var(--ink); color:#fff; cursor:pointer}
+button.quiet{background:var(--panel); color:var(--ink); padding:5px 12px; border-width:1px}
+details.keybox summary{cursor:pointer; color:var(--ink-2); font-size:.92rem}
+details.keybox[open]{background:var(--panel); border:1px solid var(--ink); padding:12px 14px; flex-basis:100%}
+.keyrow{display:flex; gap:8px; flex-wrap:wrap; margin:10px 0 4px}
+.keyrow input{flex:1 1 260px; font:inherit; padding:7px 10px; border:1px solid var(--ink)}
+#status{margin:0; min-height:1.4em}
+#status.err{color:var(--signal); font-weight:600}
 .empty{background:var(--panel); border:2px solid var(--signal); padding:20px; margin:40px 0}
 footer.site{padding:48px 0 60px; color:var(--ink-2); font-size:.88rem}
 @media (max-width:600px){ body{font-size:16px} .chartbox{height:240px} .heat{font-size:.55rem; grid-template-columns:28px repeat(24,1fr)} }
@@ -118,8 +137,27 @@ footer.site{padding:48px 0 60px; color:var(--ink-2); font-size:.88rem}
 </head>
 <body>
 <div class="wrap">
+  <nav class="channels" aria-label="Channels">
+    <div class="tablist" id="tablist"></div>
+    <div class="lookup-row">
+      <form class="lookup" id="lookup">
+        <input id="q" name="q" autocomplete="off" spellcheck="false" placeholder="Paste any channel, e.g. @veritasium" aria-label="Channel handle or link">
+        <button type="submit">Look up</button>
+      </form>
+      <details class="keybox" id="keybox">
+        <summary>API key for lookups</summary>
+        <div class="keyrow">
+          <input id="key" type="password" autocomplete="off" placeholder="AIza…" aria-label="YouTube API key">
+          <button type="button" id="saveKey">Save key</button>
+          <button type="button" class="quiet" id="clearKey">Remove</button>
+        </div>
+        <p class="note">Saved only in this browser, never uploaded. Use a separate key restricted to your github.io address, not the one in your GitHub secret.</p>
+      </details>
+    </div>
+    <p id="status" class="note" role="status"></p>
+  </nav>
   <header class="hero" id="hero">
-    <div class="who" id="who">Loading channel data…</div>
+    <div class="who" id="who"></div>
   </header>
   <main id="main"></main>
   <footer class="site" id="foot"></footer>
@@ -165,22 +203,160 @@ function chart(id, cfg){ const el=document.getElementById(id); if(!el||!window.C
 const dateTicks = { callback: v => new Date(v).toLocaleDateString("en-GB",{month:"short",year:"2-digit"}) };
 
 /* ---------- state ---------- */
-const S = { data:null, hist:null, includeShorts:true, sort:{key:"published",dir:-1}, timer:null };
+const S = { data:null, hist:null, includeShorts:true, sort:{key:"published",dir:-1}, timer:null,
+            tabs:[], current:null, live:false, liveTab:null };
+const store = { get:k=>{try{return localStorage.getItem(k)}catch(e){return null}},
+                set:(k,v)=>{try{localStorage.setItem(k,v);return true}catch(e){return false}},
+                del:k=>{try{localStorage.removeItem(k)}catch(e){}} };
+const LIVE_CACHE_HOURS = 6;
+const LIVE_COMMENT_VIDEOS = 60; // comments fetched for the 40 most-viewed + 20 newest videos
+
+function status(msg, err=false){ const el=$("#status"); el.textContent=msg||""; el.classList.toggle("err",!!err); }
+
+/* '@name', 'name', a youtube.com link, or a UC… id -> {kind, value, slug} */
+function parseRef(input){
+  let x = String(input||"").trim();
+  const m = x.match(/youtube\.com\/(?:channel\/)?(@?[\w.\-]+)/i); if(m) x = m[1];
+  if(/^UC[\w-]{22}$/.test(x)) return {kind:"id", value:x, slug:x};
+  x = x.replace(/^@/,"");
+  return x ? {kind:"handle", value:x, slug:x.toLowerCase()} : null;
+}
+
+function clearView(){
+  clearInterval(S.timer);
+  $("#who").innerHTML = "";
+  $("#hero").querySelectorAll(".clock,.clock-caption,.forecast,.barcode,.controls").forEach(e=>e.remove());
+}
+
+function showEmpty(html){ clearView(); $("#main").innerHTML = `<div class="empty">${html}</div>`; $("#foot").innerHTML=""; }
+
+function drawTabs(){
+  const tabs = S.tabs.map(t=>({...t}));
+  if(S.liveTab && !tabs.some(t=>t.slug===S.liveTab.slug)) tabs.push({...S.liveTab, live:true});
+  $("#tablist").innerHTML = tabs.map(t=>`<a class="tab" href="?c=${encodeURIComponent(t.slug)}" data-slug="${esc(t.slug)}" data-live="${t.live?1:""}" ${t.slug===S.current?'aria-current="page"':""}>${t.avatar?`<img src="${esc(t.avatar)}" alt="" loading="lazy">`:`<span class="ph"></span>`}${esc(t.title)}${t.live?`<span class="live">live</span>`:""}</a>`).join("");
+  $("#tablist").querySelectorAll(".tab").forEach(a=>a.onclick=e=>{
+    if(e.metaKey||e.ctrlKey||e.shiftKey) return;
+    e.preventDefault(); if(a.dataset.slug===S.current) return;
+    a.dataset.live ? lookup(a.dataset.slug) : loadTab(a.dataset.slug);
+  });
+}
+
+function setUrl(slug, push){ const u=new URL(location.href); u.searchParams.set("c",slug); history[push?"pushState":"replaceState"]({},"",u); }
+
+function show(data, hist, slug, live){
+  S.data=data; S.hist=hist; S.current=slug; S.live=live;
+  S.sort={key:"published",dir:-1};
+  const shorts = data.videos.filter(isShort).length;
+  S.includeShorts = shorts < data.videos.length/2; // hide Shorts by default on a mostly long-form channel
+  drawTabs(); render();
+}
+
+async function loadTab(slug, push=true){
+  status("Loading…");
+  try{
+    const r = await fetch(`data/${encodeURIComponent(slug)}/latest.json`, {cache:"no-cache"});
+    if(!r.ok) throw new Error(r.status);
+    const data = await r.json();
+    let hist=null; try{ const h=await fetch(`data/${encodeURIComponent(slug)}/history.json`,{cache:"no-cache"}); if(h.ok) hist=await h.json(); }catch(e){}
+    setUrl(slug, push); show(data, hist, slug, false); status("");
+  }catch(e){ status(`Couldn't load the saved data for ${slug}. It appears after the next workflow run.`, true); }
+}
+
+async function lookup(input, {force=false, push=true}={}){
+  const ref = parseRef(input);
+  if(!ref){ status("Paste a channel handle like @veritasium or a YouTube channel link.", true); return; }
+  if(S.tabs.some(t=>t.slug===ref.slug)) return loadTab(ref.slug, push);
+  let cached=null; try{ cached = !force && JSON.parse(store.get("live:"+ref.slug) || "null"); }catch(e){}
+  let data = cached && Date.now()-cached.saved < LIVE_CACHE_HOURS*36e5 ? cached.data : null;
+  if(!data){
+    const key = store.get("yt_key");
+    if(!key){ $("#keybox").open=true; $("#key").focus(); status("Live lookups need a YouTube API key. Paste one above and save it, then look up again.", true); return; }
+    try{ data = await fetchLive(ref, key, msg=>status(msg)); }
+    catch(e){ status(e.message, true); return; }
+    store.set("live:"+ref.slug, JSON.stringify({saved:Date.now(), data})); // may silently fail for huge channels
+  }
+  S.liveTab = {slug:ref.slug, title:data.channel.title, avatar:data.channel.avatar};
+  setUrl(ref.slug, push); show(data, null, ref.slug, true); status("");
+  $("#q").value="";
+}
+
+/* Browser-side port of scripts/fetch_stats.py; returns the same shape as latest.json */
+async function fetchLive(ref, key, progress){
+  const yt = async (endpoint, params) => {
+    const u = new URL("https://www.googleapis.com/youtube/v3/"+endpoint);
+    Object.entries({...params, key}).forEach(([k,v])=>u.searchParams.set(k,v));
+    let r; try{ r = await fetch(u); }catch(e){ throw new Error("Couldn't reach YouTube. Check your connection."); }
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok){ const why = (j.error?.message||"").replace(/<[^>]+>/g,""); throw Object.assign(new Error(`YouTube refused the request (${r.status}): ${why||"unknown error"}`), {status:r.status}); }
+    return j;
+  };
+  const dur = s => { const m=/P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/.exec(s||""); return m ? (+m[1]||0)*86400+(+m[2]||0)*3600+(+m[3]||0)*60+(+m[4]||0) : 0; };
+
+  progress("Finding the channel…");
+  const chRes = await yt("channels", {part:"snippet,statistics,contentDetails", ...(ref.kind==="id"?{id:ref.value}:{forHandle:ref.value})});
+  const ch = chRes.items?.[0];
+  if(!ch) throw new Error(`No channel found for "${ref.value}". Check the spelling of the handle.`);
+
+  const ids=[]; let token=null;
+  do{
+    const page = await yt("playlistItems", {part:"contentDetails", playlistId:ch.contentDetails.relatedPlaylists.uploads, maxResults:50, ...(token?{pageToken:token}:{})});
+    ids.push(...(page.items||[]).map(i=>i.contentDetails.videoId)); token = page.nextPageToken;
+    progress(`Listing uploads… ${ids.length}`);
+  }while(token);
+
+  const videos=[];
+  for(let i=0;i<ids.length;i+=50){
+    const page = await yt("videos", {part:"snippet,statistics,contentDetails,liveStreamingDetails", id:ids.slice(i,i+50).join(",")});
+    for(const v of page.items||[]){
+      const sn=v.snippet, st=v.statistics||{};
+      if(["live","upcoming"].includes(sn.liveBroadcastContent)) continue;
+      videos.push({ id:v.id, title:sn.title, published:sn.publishedAt, duration:dur(v.contentDetails.duration),
+        views:+(st.viewCount||0), likes:"likeCount" in st?+st.likeCount:null, comments:"commentCount" in st?+st.commentCount:null,
+        thumb:(sn.thumbnails?.medium||sn.thumbnails?.default||{}).url||"", was_live:!!v.liveStreamingDetails, top_comments:[] });
+    }
+    progress(`Reading video stats… ${Math.min(i+50,ids.length)} of ${ids.length}`);
+  }
+  videos.sort((a,b)=>a.published<b.published?-1:1);
+
+  const pick = new Set([...videos].sort((a,b)=>b.views-a.views).slice(0,LIVE_COMMENT_VIDEOS*2/3).map(v=>v.id));
+  videos.slice(-LIVE_COMMENT_VIDEOS/3).forEach(v=>pick.add(v.id));
+  const queue = videos.filter(v=>pick.has(v.id)); let done=0;
+  const worker = async () => { for(let v; (v=queue.shift());){
+    try{
+      const res = await yt("commentThreads", {part:"snippet", videoId:v.id, maxResults:100, order:"relevance", textFormat:"plainText"});
+      v.top_comments = (res.items||[]).map(it=>{ const c=it.snippet.topLevelComment.snippet;
+        return {author:c.authorDisplayName||"", text:(c.textOriginal||c.textDisplay||"").slice(0,1200), likes:c.likeCount||0, replies:it.snippet.totalReplyCount||0, published:c.publishedAt}; })
+        .sort((a,b)=>b.likes-a.likes).slice(0,3);
+    }catch(e){ if(e.status===403 && /quota/i.test(e.message)) throw e; } // disabled comments are fine; quota is not
+    progress(`Reading comments… ${++done} of ${pick.size}`);
+  }};
+  await Promise.all(Array.from({length:6}, worker));
+
+  const s=ch.statistics, th=ch.snippet.thumbnails||{};
+  const custom = ch.snippet.customUrl || (ref.kind==="handle" ? ref.value : ch.id);
+  return { generated_at:new Date().toISOString(), comments_sampled:pick.size,
+    channel:{ id:ch.id, handle:custom.startsWith("@")||custom.startsWith("UC")?custom:"@"+custom, title:ch.snippet.title,
+      avatar:(th.high||th.default||{}).url||"", created:ch.snippet.publishedAt,
+      subscribers:+(s.subscriberCount||0), subscribers_hidden:!!s.hiddenSubscriberCount, views:+(s.viewCount||0), video_count:+(s.videoCount||0) },
+    videos };
+}
+
+async function route(push=false){
+  const want = new URLSearchParams(location.search).get("c");
+  if(want) return lookup(want, {push});
+  if(S.tabs.length) return loadTab(S.tabs[0].slug, push);
+  showEmpty(`<h2>No saved channels yet</h2><p>The daily GitHub Action creates the saved tabs from <code>channels.txt</code>. Open the repository's Actions tab, choose “Update channel stats” and run it once. You can still look up any channel above with an API key.</p>`);
+}
 
 async function boot(){
-  try{
-    const r = await fetch("data/latest.json", {cache:"no-cache"});
-    if(!r.ok) throw new Error(r.status);
-    S.data = await r.json();
-  }catch(e){
-    $("#who").textContent = "";
-    $("#main").innerHTML = `<div class="empty"><h2>No data yet</h2><p>This page reads <code>data/latest.json</code>, which the daily GitHub Action creates. Open the repository's Actions tab, choose “Update channel stats” and run it once. The page fills in as soon as the run finishes.</p></div>`;
-    return;
-  }
-  try{ const r = await fetch("data/history.json",{cache:"no-cache"}); if(r.ok) S.hist = await r.json(); }catch(e){}
-  const shorts = S.data.videos.filter(isShort).length;
-  S.includeShorts = shorts < S.data.videos.length/2; // hide Shorts by default on a mostly long-form channel
-  render();
+  try{ const r = await fetch("data/channels.json",{cache:"no-cache"}); if(r.ok) S.tabs = await r.json(); }catch(e){}
+  drawTabs();
+  $("#key").value = store.get("yt_key") || "";
+  $("#saveKey").onclick = () => { const k=$("#key").value.trim(); if(!k){ status("Paste a key first.", true); return; } store.set("yt_key",k); $("#keybox").open=false; status("Key saved in this browser."); };
+  $("#clearKey").onclick = () => { store.del("yt_key"); $("#key").value=""; status("Key removed from this browser."); };
+  $("#lookup").onsubmit = e => { e.preventDefault(); lookup($("#q").value); };
+  window.onpopstate = () => route(false);
+  route(false);
 }
 
 /* ---------- derive ---------- */
@@ -201,8 +377,8 @@ function render(){
   const {now, vids, med, gaps} = derive();
   const ch = S.data.channel;
   document.title = `${ch.title}, by the numbers`;
-  $("#who").innerHTML = `${ch.avatar?`<img src="${esc(ch.avatar)}" alt="">`:""}<div><a href="https://www.youtube.com/${esc(ch.handle)}" target="_blank" rel="noopener">${esc(ch.title)}</a><small>${esc(ch.handle)} on YouTube, measured daily</small></div>`;
-  if(!vids.length){ $("#main").innerHTML = `<div class="empty"><p>No videos match the current filter.</p></div>`; return; }
+  $("#who").innerHTML = `${ch.avatar?`<img src="${esc(ch.avatar)}" alt="">`:""}<div><a href="https://www.youtube.com/${esc(ch.handle)}" target="_blank" rel="noopener">${esc(ch.title)}</a><small>${esc(ch.handle)} on YouTube, ${S.live?"looked up live":"measured daily"}</small></div>`;
+  if(!vids.length){ clearInterval(S.timer); $("#hero").querySelectorAll(".clock,.clock-caption,.forecast,.barcode,.controls").forEach(e=>e.remove()); $("#main").innerHTML = `<div class="empty"><p>No videos match the current filter.</p></div>`; return; }
 
   const last = vids[vids.length-1];
   const gd = gaps.map(g=>g.days);
@@ -235,9 +411,10 @@ function render(){
       <figcaption class="barcode-legend"><span>${fmtDate(vids[0].t)}</span><span>Each bar is an upload. Taller means more views. Red is the current wait.</span><span>today</span></figcaption></figure>
     <div class="controls">
       <label><input type="checkbox" id="shorts" ${S.includeShorts?"checked":""}> Include Shorts (videos of 3 minutes or less)</label>
-      <span class="stamp">Data refreshed ${new Date(S.data.generated_at).toLocaleString("en-GB",{dateStyle:"medium",timeStyle:"short"})}</span>
+      <span class="stamp">${S.live?"Fetched live":"Data refreshed"} ${new Date(S.data.generated_at).toLocaleString("en-GB",{dateStyle:"medium",timeStyle:"short"})}</span>${S.live?`<button type="button" class="quiet" id="refetch">Fetch again</button>`:""}
     </div>`);
   $("#shorts").onchange = e => { S.includeShorts = e.target.checked; render(); };
+  if(S.live) $("#refetch").onclick = () => lookup(S.current, {force:true, push:false});
   clearInterval(S.timer);
   const tick = () => { let s=Math.floor((Date.now()-last.t)/1000); const d=Math.floor(s/86400); s%=86400; const h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=s%60;
     $("#clock").innerHTML = `<span>${d}<span class="u">d</span></span> <span>${String(h).padStart(2,"0")}<span class="u">h</span>${String(m).padStart(2,"0")}<span class="u">m</span>${String(x).padStart(2,"0")}<span class="u">s</span></span>`; };
@@ -331,12 +508,12 @@ function render(){
         <p class="note">${mom.subDelta!=null?`${mom.subDelta>=0?"+":""}${nf.format(mom.subDelta)} over the last ${mom.span} days.`:""}</p></div>
       <div class="panel"><h3>Views gained in the last ${mom.span===1?"day":mom.span+" days"}</h3><ol class="board">${mom.top.map(m=>`<li>${vlink(m.v)}<b>+${cf.format(m.d)}</b></li>`).join("")}</ol>
         <p class="note">${mom.backCatalog!=null?`${pf(mom.backCatalog,0)} of recent views went to videos more than 90 days old.`:""}</p></div>
-    </div>` : `<div class="panel"><p>Momentum needs at least two daily snapshots. Check back tomorrow.</p></div>`}
+    </div>` : `<div class="panel"><p>${S.live?`Live lookups are a single snapshot, so there is no history to compare. Add <code>${esc(ch.handle)}</code> to <code>channels.txt</code> to give this channel a permanent tab that collects daily history.`:"Momentum needs at least two daily snapshots. Check back tomorrow."}</p></div>`}
   </section>
 
   <section id="comments">
     <h2>Comments</h2>
-    <p class="lede">The most-liked comment on each video, taken from its 100 most relevant comment threads.</p>
+    <p class="lede">The most-liked comment on each video, taken from its 100 most relevant comment threads.${S.live?` For live lookups, only the ${S.data.comments_sampled} most-viewed and newest videos are checked to save quota.`:""}</p>
     ${champ ? `<blockquote class="champion"><p>${esc(champ.text)}</p>
       <footer>${esc(champ.author)}, ${nf.format(champ.likes)} likes, on ${vlink(champ.v)}${champRatio?`. That is ${champRatio>=1?`${champRatio.toFixed(1)}× the likes on the video itself`:`${pf(champRatio,0)} of the video's own likes`}.`:""}</footer></blockquote>
     <div class="comments">${perVideoTop.filter(c=>c!==champ && !(c.v.id===champ.v.id && c.text===champ.text)).slice(0,9).map(c=>`<article class="comment"><p>${esc(c.text)}</p><div class="meta">${esc(c.author)}, ${nf.format(c.likes)} likes, on ${vlink(c.v)}</div></article>`).join("")}</div>
@@ -378,7 +555,7 @@ function render(){
     <div class="tablewrap"><table id="tbl"></table></div>
   </section>`;
 
-  $("#foot").innerHTML = `Data from the YouTube Data API, collected once a day by a GitHub Action. Like and comment counts can lag YouTube by a few hours. Not affiliated with ${esc(ch.title)}.`;
+  $("#foot").innerHTML = `Data from the YouTube Data API, ${S.live?"fetched from your browser just now":"collected once a day by a GitHub Action"}. Like and comment counts can lag YouTube by a few hours. Not affiliated with ${esc(ch.title)}.`;
 
   drawCharts(vids, gaps, med, since, q3, fit, mom);
   drawTable(vids);

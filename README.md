@@ -1,12 +1,32 @@
-# Current Concept, by the numbers
+# YouTube channels, by the numbers
 
-A static GitHub Pages site with daily-updated statistics for the
-[Current Concept](https://www.youtube.com/@currentconcept) YouTube channel.
+A static GitHub Pages site with daily-updated statistics for the YouTube channels listed in
+`channels.txt` (starting with [Current Concept](https://www.youtube.com/@currentconcept)),
+plus a box for looking up any other channel on the spot.
 
 A GitHub Action runs every morning (04:17 UTC), pulls data from the YouTube Data API v3,
-and commits two files: `data/latest.json` (current snapshot) and `data/history.json`
-(one row per day, which powers the subscriber chart and "views gained this week").
-`index.html` reads those files in the browser. No build step, no dependencies.
+writes `data/<channel>/latest.json` and `data/<channel>/history.json` for each channel,
+commits them, and deploys the site. No build step, no dependencies.
+
+## Tabs: `channels.txt`
+Put one channel per line: `@handle`, a `youtube.com/@handle` link, or a `UC…` channel ID.
+The first line is the tab that opens by default. Saving the file on GitHub starts a run,
+and the new tabs appear once it finishes. Tab channels collect daily history; anything
+removed from the list keeps its old data folder but loses its tab.
+
+## Looking up any channel
+Paste a handle or link into the box at the top and press **Look up**. This fetches the
+channel straight from your browser, so it needs an API key saved in that browser
+(open **API key for lookups**). The key stays in the browser's local storage and is never uploaded.
+
+Use a **second key** for this, not the one in your GitHub secret: in Google Cloud Console
+create another API key, restrict it to YouTube Data API v3, and under Application restrictions
+choose **Websites** and add `https://<your-username>.github.io/*`. That key then only works on your site.
+
+A lookup costs roughly 2 quota units per 50 videos plus 1 per video whose comments are read
+(capped at the 40 most-viewed and 20 newest). Results are cached in the browser for 6 hours;
+**Fetch again** refreshes early. Lookups are single snapshots, so the Momentum section needs a tab.
+Links like `?c=veritasium` open that channel directly.
 
 ## What's on the page
 - Live counter since the last upload, predicted next upload, and how unusual the current wait is
@@ -27,7 +47,7 @@ and commits two files: `data/latest.json` (current snapshot) and `data/history.j
    (keep the `.github/workflows` folder).
 3. **Add the secret.** Repo → Settings → Secrets and variables → Actions → New repository secret,
    name `YT_API_KEY`, value = your key.
-4. **Turn on Pages.** Settings → Pages → Source: *Deploy from a branch*, branch `main`, folder `/ (root)`.
+4. **Turn on Pages.** Settings → Pages → Source: **GitHub Actions**.
 5. **First run.** Actions tab → *Update channel stats* → *Run workflow*. After it finishes, the site
    is live at `https://<your-username>.github.io/<repo-name>/`.
 
@@ -37,8 +57,8 @@ and commits two files: `data/latest.json` (current snapshot) and `data/history.j
   Set `FULL_REFRESH=1` in the workflow env to refresh all of them.
 - "Top comment" means the most-liked among the 100 most relevant threads the API returns per video.
 - Shorts are identified by length (3 minutes or less), since the API has no Shorts flag.
-- To track another channel, change `CHANNEL_HANDLE` in `.github/workflows/update-stats.yml`.
 - GitHub may pause scheduled workflows in repos with no activity for 60 days. If the data stops
   updating, re-enable the workflow from the Actions tab.
 - Local preview: `python -m http.server` in this folder, then open http://localhost:8000
-  (opening `index.html` directly from disk won't load the JSON).
+  (opening `index.html` directly from disk won't load the JSON). A key restricted to your
+  github.io address won't work on localhost.

@@ -5,7 +5,7 @@ on:
     - cron: "17 4 * * *"   # every day at 04:17 UTC
   workflow_dispatch:        # run it by hand from the Actions tab
   push:
-    branches: [main]        # redeploy when you edit the site
+    branches: [main]        # redeploy when you edit the site or channels.txt
 
 permissions:
   contents: write
@@ -33,13 +33,12 @@ jobs:
         run: python scripts/fetch_stats.py
         env:
           YT_API_KEY: ${{ secrets.YT_API_KEY }}
-          CHANNEL_HANDLE: "@currentconcept"
 
       - name: Commit data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/
+          git add -A data/
           git diff --staged --quiet || git commit -m "Daily stats $(date -u +%F)"
           git push
 
