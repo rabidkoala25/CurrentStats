@@ -4,9 +4,13 @@ on:
   schedule:
     - cron: "17 4 * * *"   # every day at 04:17 UTC
   workflow_dispatch:        # run it by hand from the Actions tab
+  push:
+    branches: [main]        # redeploy when you edit the site
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 concurrency:
   group: update-stats
@@ -15,10 +19,13 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -35,3 +42,12 @@ jobs:
           git add data/
           git diff --staged --quiet || git commit -m "Daily stats $(date -u +%F)"
           git push
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: .
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
